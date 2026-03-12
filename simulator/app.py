@@ -56,10 +56,20 @@ def generate_transaction():
         "event_time": fake.iso8601(),
     }
 
-producer = KafkaProducer(
-    bootstrap_servers=bootstrap,
-    value_serializer=lambda v: json.dumps(v).encode("utf-8"),
-)
+def create_producer():
+    while True:
+        try:
+            p = KafkaProducer(
+                bootstrap_servers=bootstrap,
+                value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+            )
+            print(f"Connected to Kafka at {bootstrap}")
+            return p
+        except Exception as e:
+            print(f"Kafka not ready, retrying in 3s: {e}")
+            time.sleep(3)
+
+producer = create_producer()
 
 if __name__ == "__main__":
     print(f"Sending messages to {bootstrap}, topic={topic}")
