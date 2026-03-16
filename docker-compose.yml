@@ -67,4 +67,27 @@ services:
       - "5050:80"
     depends_on:
       - postgres
+    volumes:
+      - ./infra/pgadmin:/var/lib/pgadmin
 
+  flink-jobmanager:
+    build: ./flink-job
+    image: custom-flink-py:1.18
+    container_name: flink-jobmanager
+    hostname: flink-jobmanager
+    ports:
+      - "8081:8081"
+    command: jobmanager
+    environment:
+      - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
+    volumes:
+      - ./flink-job:/opt/flink/job
+
+  flink-taskmanager:
+    image: custom-flink-py:1.18
+    container_name: flink-taskmanager
+    depends_on:
+      - flink-jobmanager
+    command: taskmanager
+    environment:
+      - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
