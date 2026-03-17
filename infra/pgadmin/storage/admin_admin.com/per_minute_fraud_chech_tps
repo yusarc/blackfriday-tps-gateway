@@ -1,0 +1,10 @@
+SELECT
+    date_trunc('minute', ts) AS minute_bucket,
+    SUM(tps) AS tps_de_3ds_100plus
+FROM tps_metrics
+WHERE ts >= NOW() - INTERVAL '10 minutes'
+  AND country = 'DE'
+  AND auth_method = '3DS'
+  AND amount_bucket = '100+'
+GROUP BY date_trunc('minute', ts)
+ORDER BY minute_bucket;

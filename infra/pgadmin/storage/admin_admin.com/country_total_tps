@@ -1,0 +1,7 @@
+SELECT
+    country,
+    SUM(tps) AS total_tps_last_10_min
+FROM tps_metrics
+WHERE ts >= NOW() - INTERVAL '10 minutes'
+GROUP BY country
+ORDER BY total_tps_last_10_min DESC;

@@ -1,0 +1,8 @@
+SELECT
+    auth_method,
+    amount_bucket,
+    SUM(tps) AS total_tps_last_10_min
+FROM tps_metrics
+WHERE ts >= NOW() - INTERVAL '10 minutes'
+GROUP BY auth_method, amount_bucket
+ORDER BY auth_method, amount_bucket;

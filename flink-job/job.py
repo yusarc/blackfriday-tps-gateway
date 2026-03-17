@@ -5,11 +5,28 @@ from pyflink.common.serialization import SimpleStringSchema
 from pyflink.common.typeinfo import Types
 
 import json
+import psycopg2
+from datetime import datetime
 
 
 KAFKA_TOPIC = "payments_raw"
 KAFKA_BOOTSTRAP = "kafka:9092"
 KAFKA_GROUP_ID = "flink-tps-consumer"
+
+PG_HOST = "postgres"
+PG_PORT = 5432
+PG_DB = "bf_payments"
+PG_USER = "bf_user"
+PG_PASSWORD = "bf_pass"
+
+
+def amount_to_bucket(amount: float) -> str:
+    if amount < 50:
+        return "0-50"
+    elif amount < 100:
+        return "50-100"
+    else:
+        return "100+"
 
 
 def main():
@@ -31,104 +48,77 @@ def main():
 
     stream = env.add_source(consumer)
 
-    # ---------- Ortak: JSON parse edip temel alanları çıkar ----------
-    # (country, amount, auth_method) tuple'ı
-    def to_tuple(s: str):
+    # ---------- JSON -> (country, auth_method, bucket, 1) ----------
+    def to_dim_tuple(s: str):
         try:
             e = json.loads(s)
             country = e.get("country", "UNKNOWN")
             amount = float(e.get("amount", 0.0))
             auth_method = e.get("auth_method", "UNKNOWN")
+            bucket = amount_to_bucket(amount)
         except Exception:
             country = "PARSE_ERROR"
-            amount = 0.0
             auth_method = "UNKNOWN"
-        return (country, amount, auth_method)
+            bucket = "0-50"
+        return (country, auth_method, bucket, 1)
 
     events = stream.map(
-        to_tuple,
+        to_dim_tuple,
         output_type=Types.TUPLE([
             Types.STRING(),  # country
-            Types.FLOAT(),   # amount
-            Types.STRING()   # auth_method
+            Types.STRING(),  # auth_method
+            Types.STRING(),  # amount_bucket
+            Types.INT()      # count
         ])
     )
 
-    # ---------- 1) Country-based TPS ----------
-    # (country, 1)
-    country_counts = events.map(
-        lambda e: (e[0], 1),
-        output_type=Types.TUPLE([Types.STRING(), Types.INT()])
-    )
+    # ---------- Key: (country, auth_method, bucket) + 1s window + sum ----------
+    keyed = events.key_by(lambda e: (e[0], e[1], e[2]))
 
-    country_tps = (
-        country_counts
-        .key_by(lambda x: x[0])  # country
+    windowed = (
+        keyed
         .window(TumblingProcessingTimeWindows.of(Time.seconds(1)))
-        .reduce(lambda a, b: (a[0], a[1] + b[1]))
+        .reduce(lambda a, b: (a[0], a[1], a[2], a[3] + b[3]))
     )
 
-    # ---------- 2) Global TPS ----------
-    global_ones = country_counts.map(
-        lambda x: x[1],
-        output_type=Types.INT()
-    )
+    # ---------- Postgres'e yazan map ----------
+    def write_to_postgres(rec):
+        country, auth_method, bucket, tps = rec
 
-    global_tps = (
-        global_ones
-        .window_all(TumblingProcessingTimeWindows.of(Time.seconds(1)))
-        .reduce(lambda a, b: a + b)
-    )
+        # ts: Flink'in window end timestamp'ını burada bilmiyoruz; basitçe NOW() kullanıyoruz
+        ts = datetime.utcnow()
 
-    # ---------- 3) High-value TPS (amount > 100) ----------
-    high_value_flags = events.map(
-        lambda e: 1 if e[1] > 100.0 else 0,
-        output_type=Types.INT()
-    )
+        conn = psycopg2.connect(
+            host=PG_HOST,
+            port=PG_PORT,
+            dbname=PG_DB,
+            user=PG_USER,
+            password=PG_PASSWORD,
+        )
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO tps_metrics (ts, country, auth_method, amount_bucket, tps)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (ts, country, auth_method, bucket, int(tps)),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
 
-    high_value_tps = (
-        high_value_flags
-        .window_all(TumblingProcessingTimeWindows.of(Time.seconds(1)))
-        .reduce(lambda a, b: a + b)
-    )
+        # Log için string döndürelim
+        return f"INSERTED ts={ts} country={country} auth={auth_method} bucket={bucket} tps={tps}"
 
-    # ---------- 4) 3DS auth TPS ----------
-    auth_3ds_flags = events.map(
-        lambda e: 1 if e[2] == "3DS" else 0,
-        output_type=Types.INT()
-    )
-
-    auth_3ds_tps = (
-        auth_3ds_flags
-        .window_all(TumblingProcessingTimeWindows.of(Time.seconds(1)))
-        .reduce(lambda a, b: a + b)
-    )
-
-    # ---------- Print outputs with prefixes ----------
-    country_tps.map(
-        lambda x: f"COUNTRY_TPS country={x[0]} tps={x[1]}",
+    result = windowed.map(
+        write_to_postgres,
         output_type=Types.STRING()
-    ).print()
+    )
 
-    global_tps.map(
-        lambda v: f"GLOBAL_TPS tps={v}",
-        output_type=Types.STRING()
-    ).print()
+    result.print()
 
-    high_value_tps.map(
-        lambda v: f"HIGH_VALUE_TPS amount>100 tps={v}",
-        output_type=Types.STRING()
-    ).print()
-
-    auth_3ds_tps.map(
-        lambda v: f"AUTH_3DS_TPS tps={v}",
-        output_type=Types.STRING()
-    ).print()
-
-    env.execute("Country, High-Value, 3DS TPS")
+    env.execute("TPS metrics to Postgres")
 
 
 if __name__ == "__main__":
     main()
-
-

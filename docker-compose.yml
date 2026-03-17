@@ -1,3 +1,5 @@
+version: "3.9"
+
 services:
   zookeeper:
     image: confluentinc/cp-zookeeper:7.6.0
@@ -30,6 +32,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
+      - pgdata:/var/lib/postgresql/data
       - ./infra/postgres-init.sql:/docker-entrypoint-initdb.d/init.sql
 
   simulator:
@@ -40,6 +43,8 @@ services:
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPIC: payments_raw
+      BLACKFRIDAY_MODE: "true"
+    restart: "no"
 
   consumer:
     build: ./consumers
@@ -91,3 +96,21 @@ services:
     command: taskmanager
     environment:
       - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
+
+  flink-job:
+    image: custom-flink-py:1.18
+    container_name: flink-job
+    depends_on:
+      - flink-jobmanager
+      - flink-taskmanager
+      - kafka
+      - postgres
+    command: >
+      bash -c "python /opt/flink/job/job.py"
+    volumes:
+      - ./flink-job:/opt/flink/job
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+
